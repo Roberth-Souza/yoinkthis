@@ -5,13 +5,8 @@ A single small C binary that opens as a centered layer-shell overlay — cold st
 well under 100ms.
 
 It is a pure **picker** over the [cliphist](https://github.com/sentriz/cliphist)
-database. Something must feed cliphist (noctalia-shell already does on this setup);
-otherwise run:
-
-```
-wl-paste --type text  --watch cliphist store
-wl-paste --type image --watch cliphist store
-```
+database — it never captures clipboard changes itself. See
+[Clipboard capture](#clipboard-capture) for the required watchers.
 
 ## Requirements
 
@@ -35,6 +30,35 @@ wl-paste --type image --watch cliphist store
 make
 sudo make install    # installs to /usr/local/bin, override with PREFIX=
 ```
+
+## Clipboard capture
+
+yoinkthis only reads history; something must be writing it. Two `wl-paste`
+watchers have to run in the background and store every new copy into cliphist:
+
+```
+wl-paste --type text  --watch cliphist store
+wl-paste --type image --watch cliphist store
+```
+
+Some shells already manage these for you (e.g. noctalia-shell with clipboard
+history enabled) — in that case there is nothing to do. Otherwise autostart
+them from your compositor config. Hyprland:
+
+```
+exec-once = wl-paste --type text --watch cliphist store
+exec-once = wl-paste --type image --watch cliphist store
+```
+
+Lua-based config:
+
+```lua
+hl.exec_once("wl-paste --type text --watch cliphist store")
+hl.exec_once("wl-paste --type image --watch cliphist store")
+```
+
+Without the image watcher, images are never stored and the `[img]` filter will
+always be empty.
 
 ## Hyprland
 
