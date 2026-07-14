@@ -86,9 +86,26 @@ No window rules needed — the overlay layer and centering come from layer-shell
 | `Ctrl+d` / `Ctrl+u` | jump half page |
 | `Enter` / click | copy entry to clipboard and close |
 | `Esc` | close |
-| `Ctrl+x` | delete selected entry |
-| `Ctrl+Shift+X` twice | wipe all history |
+| `Ctrl+x` | delete selected entry (no-op on pinned) |
+| `Ctrl+Shift+X` twice | wipe all history except pinned |
 | `Ctrl+f` | cycle filter: all → text → images |
+
+## Pinning
+
+Selecting a row reveals a translucent pushpin at its right edge — click it to
+pin the entry (mouse only, no keybind). Pinned entries:
+
+- float to the top of the list, above the newest-first history;
+- always show a solid white pin icon;
+- cannot be deleted: `Ctrl+x` ignores them and the `Ctrl+Shift+X` wipe removes
+  everything else but keeps them. Unpin first (click the solid pin) to delete.
+
+Pins persist across sessions in `~/.local/state/yoinkthis/pins` (one cliphist
+id per line).
+
+Note: cliphist dedupes re-copied content under a new id, so re-copying a
+pinned item creates a fresh unpinned entry; the orphaned pin is pruned on the
+next launch.
 
 ## Theming
 
@@ -97,4 +114,4 @@ The built-in theme mirrors `~/.config/rofi/config.rasi`. To customize, copy
 no rebuild needed.
 
 Image thumbnails are cached (already scaled) in `~/.cache/yoinkthis/thumbs/`
-and cleared automatically on wipe.
+and cleared automatically on wipe (kept when the wipe spares pinned entries).

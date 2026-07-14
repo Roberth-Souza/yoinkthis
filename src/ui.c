@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cliphist.h"
+#include "pins.h"
 #include "thumbs.h"
 
 #define LIST_MAX_HEIGHT 400
@@ -33,10 +34,64 @@ struct Ui {
     guint append_idle_id;
     int filter_mode;
     gboolean wipe_armed;
+    GHashTable *pins;            /* pinned id set, mirrored on disk */
+    GtkListBoxRow *selected_row; /* weak-pointer tracked */
 };
 
 static ClipEntry *row_entry(GtkListBoxRow *row) {
     return g_object_get_data(G_OBJECT(row), "clip-entry");
+}
+
+/* --- pin icon -------------------------------------------------------------- */
+
+/* Stroke-only pushpin, needle to the bottom-left; recolored only via CSS
+ * opacity so the white outline stays visible on the dark theme. */
+static const char PIN_SVG[] =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'"
+    " viewBox='-2 -2 28 28' fill='none' stroke='#ffffff' stroke-width='2'"
+    " stroke-linecap='round' stroke-linejoin='round'>"
+    "<g transform='rotate(45 12 12)'>"
+    "<path d='M12 17v5'/>"
+    "<path d='M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16"
+    "a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9"
+    "A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4"
+    "a1 1 0 0 1 1 1z'/>"
+    "</g></svg>";
+
+#define PIN_ICON_SIZE 16
+
+static GdkPixbuf *pin_pixbuf(void) {
+    static GdkPixbuf *pixbuf = NULL;
+    static gboolean tried = FALSE;
+    if (!tried) {
+        tried = TRUE;
+        GInputStream *stream = g_memory_input_stream_new_from_data(
+            PIN_SVG, sizeof(PIN_SVG) - 1, NULL);
+        GError *error = NULL;
+        pixbuf = gdk_pixbuf_new_from_stream_at_scale(
+            stream, PIN_ICON_SIZE, PIN_ICON_SIZE, TRUE, NULL, &error);
+        if (pixbuf == NULL) {
+            g_warning("pin icon SVG failed to load: %s", error->message);
+            g_clear_error(&error);
+        }
+        g_object_unref(stream);
+    }
+    return pixbuf;
+}
+
+/* Pinned rows always show a solid pin; unpinned rows only show a translucent
+ * one while selected (CSS handles the opacity difference). */
+static void update_pin_button(GtkListBoxRow *row, gboolean selected) {
+    GtkWidget *button = g_object_get_data(G_OBJECT(row), "pin-button");
+    if (button == NULL)
+        return;
+    ClipEntry *entry = row_entry(row);
+    GtkStyleContext *context = gtk_widget_get_style_context(button);
+    if (entry->pinned)
+        gtk_style_context_add_class(context, "pinned");
+    else
+        gtk_style_context_remove_class(context, "pinned");
+    gtk_widget_set_visible(button, entry->pinned || selected);
 }
 
 static void update_prompt(Ui *ui) {
@@ -222,7 +277,7 @@ void ui_activate_selected(Ui *ui) {
 void ui_delete_selected(Ui *ui) {
     GtkListBoxRow *row =
         gtk_list_box_get_selected_row(GTK_LIST_BOX(ui->listbox));
-    if (row == NULL)
+    if (row == NULL || row_entry(row)->pinned)
         return;
 
     GError *error = NULL;
@@ -253,6 +308,47 @@ void ui_delete_selected(Ui *ui) {
     }
 }
 
+/* Batch-deletes everything except pinned entries, including entries still
+ * pending realization (those exist in cliphist too and are never pinned). */
+static void wipe_except_pinned(Ui *ui) {
+    GPtrArray *doomed = g_ptr_array_new();
+    for (guint i = 0; i < ui->rows->len; i++) {
+        ClipEntry *entry = row_entry(g_ptr_array_index(ui->rows, i));
+        if (!entry->pinned)
+            g_ptr_array_add(doomed, entry);
+    }
+    if (ui->pending != NULL) {
+        for (guint i = ui->pending_pos; i < ui->pending->len; i++)
+            g_ptr_array_add(doomed, g_ptr_array_index(ui->pending, i));
+    }
+
+    GError *error = NULL;
+    gboolean ok = cliphist_delete_entries(doomed, &error);
+    g_ptr_array_free(doomed, TRUE);
+    if (!ok) {
+        g_warning("wipe failed: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    cancel_pending(ui);
+    for (guint i = ui->rows->len; i > 0; i--) {
+        GtkListBoxRow *row = g_ptr_array_index(ui->rows, i - 1);
+        if (row_entry(row)->pinned)
+            continue;
+        g_ptr_array_remove_index(ui->rows, i - 1);
+        gtk_widget_destroy(GTK_WIDGET(row));
+    }
+
+    GPtrArray *rows = visible_rows(ui);
+    if (rows->len > 0) {
+        GtkListBoxRow *first = g_ptr_array_index(rows, 0);
+        gtk_list_box_select_row(GTK_LIST_BOX(ui->listbox), first);
+        scroll_to_row(ui, first);
+    }
+    g_ptr_array_free(rows, TRUE);
+}
+
 void ui_request_wipe(Ui *ui) {
     if (!ui->wipe_armed) {
         ui->wipe_armed = TRUE;
@@ -261,6 +357,13 @@ void ui_request_wipe(Ui *ui) {
     }
 
     ui->wipe_armed = FALSE;
+    if (g_hash_table_size(ui->pins) > 0) {
+        /* Keep the thumb cache: pinned image entries still need it. */
+        wipe_except_pinned(ui);
+        update_prompt(ui);
+        return;
+    }
+
     GError *error = NULL;
     if (!cliphist_wipe(&error)) {
         g_warning("wipe failed: %s", error->message);
@@ -296,9 +399,95 @@ void ui_focus_entry(Ui *ui) {
     gtk_widget_grab_focus(ui->entry);
 }
 
+/* --- pinning --------------------------------------------------------------- */
+
+static void track_selected_row(Ui *ui, GtkListBoxRow *row) {
+    if (ui->selected_row != NULL)
+        g_object_remove_weak_pointer(G_OBJECT(ui->selected_row),
+                                     (gpointer *)&ui->selected_row);
+    ui->selected_row = row;
+    if (row != NULL)
+        g_object_add_weak_pointer(G_OBJECT(row),
+                                  (gpointer *)&ui->selected_row);
+}
+
+static void on_row_selected(GtkListBox *listbox, GtkListBoxRow *row,
+                            gpointer user_data) {
+    (void)listbox;
+    Ui *ui = user_data;
+    if (ui->selected_row != NULL && ui->selected_row != row &&
+        !gtk_widget_in_destruction(GTK_WIDGET(ui->selected_row)))
+        update_pin_button(ui->selected_row, FALSE);
+    track_selected_row(ui, row);
+    if (row != NULL)
+        update_pin_button(row, TRUE);
+}
+
+/* Index a row belongs at: pinned rows group at the top in pin order,
+ * unpinned rows follow in their original newest-first (seq) order. */
+static guint pin_target_index(Ui *ui, GtkListBoxRow *row) {
+    ClipEntry *entry = row_entry(row);
+    guint index = 0;
+    for (guint i = 0; i < ui->rows->len; i++) {
+        GtkListBoxRow *other = g_ptr_array_index(ui->rows, i);
+        if (other == row)
+            continue;
+        ClipEntry *other_entry = row_entry(other);
+        if (entry->pinned) {
+            if (other_entry->pinned)
+                index++;
+        } else if (other_entry->pinned || other_entry->seq < entry->seq) {
+            index++;
+        }
+    }
+    return index;
+}
+
+/* GtkListBox has no move; re-insert at the target position. The extra ref
+ * keeps the row alive across the container remove. */
+static void move_row(Ui *ui, GtkListBoxRow *row, guint index) {
+    g_object_ref(row);
+    g_ptr_array_remove(ui->rows, row);
+    gtk_container_remove(GTK_CONTAINER(ui->listbox), GTK_WIDGET(row));
+    gtk_list_box_insert(GTK_LIST_BOX(ui->listbox), GTK_WIDGET(row),
+                        (gint)index);
+    g_ptr_array_insert(ui->rows, (gint)index, row);
+    g_object_unref(row);
+}
+
+static void on_pin_clicked(GtkButton *button, gpointer user_data) {
+    Ui *ui = user_data;
+    GtkListBoxRow *row = GTK_LIST_BOX_ROW(
+        gtk_widget_get_ancestor(GTK_WIDGET(button), GTK_TYPE_LIST_BOX_ROW));
+    ClipEntry *entry = row_entry(row);
+
+    entry->pinned = !entry->pinned;
+    if (entry->pinned)
+        g_hash_table_add(ui->pins, g_strdup(entry->id));
+    else
+        g_hash_table_remove(ui->pins, entry->id);
+
+    GError *error = NULL;
+    if (!pins_save(ui->pins, &error)) {
+        g_warning("failed to save pins: %s", error->message);
+        g_clear_error(&error);
+        entry->pinned = !entry->pinned;
+        if (entry->pinned)
+            g_hash_table_add(ui->pins, g_strdup(entry->id));
+        else
+            g_hash_table_remove(ui->pins, entry->id);
+        return;
+    }
+
+    move_row(ui, row, pin_target_index(ui, row));
+    gtk_list_box_select_row(GTK_LIST_BOX(ui->listbox), row);
+    scroll_to_row(ui, row);
+    update_pin_button(row, TRUE);
+}
+
 /* --- construction --------------------------------------------------------- */
 
-static GtkWidget *make_row(ClipEntry *entry) {
+static GtkWidget *make_row(Ui *ui, ClipEntry *entry) {
     GtkWidget *row = gtk_list_box_row_new();
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
 
@@ -322,9 +511,29 @@ static GtkWidget *make_row(ClipEntry *entry) {
         gtk_box_pack_start(GTK_BOX(box), label, TRUE, TRUE, 0);
     }
 
+    GdkPixbuf *pixbuf = pin_pixbuf();
+    GtkWidget *icon =
+        pixbuf != NULL
+            ? gtk_image_new_from_pixbuf(pixbuf)
+            : gtk_image_new_from_icon_name("view-pin-symbolic",
+                                           GTK_ICON_SIZE_MENU);
+    GtkWidget *button = gtk_button_new();
+    gtk_widget_set_name(button, "pin-button");
+    gtk_button_set_relief(GTK_BUTTON(button), GTK_RELIEF_NONE);
+    gtk_widget_set_can_focus(button, FALSE);
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    gtk_container_add(GTK_CONTAINER(button), icon);
+    gtk_widget_show(icon);
+    /* Visibility is driven by pin/selection state, not show_all. */
+    gtk_widget_set_no_show_all(button, TRUE);
+    gtk_box_pack_end(GTK_BOX(box), button, FALSE, FALSE, 0);
+    g_object_set_data(G_OBJECT(row), "pin-button", button);
+    g_signal_connect(button, "clicked", G_CALLBACK(on_pin_clicked), ui);
+
     gtk_container_add(GTK_CONTAINER(row), box);
     g_object_set_data_full(G_OBJECT(row), "clip-entry", entry,
                            clip_entry_free);
+    update_pin_button(GTK_LIST_BOX_ROW(row), FALSE);
     return row;
 }
 
@@ -336,7 +545,7 @@ static gboolean append_batch(gpointer data) {
     guint limit = MIN(ui->pending->len, ui->pending_pos + APPEND_BATCH);
     for (; ui->pending_pos < limit; ui->pending_pos++) {
         ClipEntry *entry = g_ptr_array_index(ui->pending, ui->pending_pos);
-        GtkWidget *row = make_row(entry); /* row now owns the entry */
+        GtkWidget *row = make_row(ui, entry); /* row now owns the entry */
         g_ptr_array_add(ui->rows, row);
         gtk_container_add(GTK_CONTAINER(ui->listbox), row);
         gtk_widget_show_all(row);
@@ -404,6 +613,40 @@ Ui *ui_build(GtkWindow *window) {
     Ui *ui = g_new0(Ui, 1);
     ui->rows = g_ptr_array_new();
     ui->filter_mode = FILTER_ALL;
+    ui->pins = pins_load();
+
+    /* Pinned entries float to the top; seq keeps the newest-first position
+     * so an unpinned row can slot back where it belongs. */
+    GPtrArray *ordered = g_ptr_array_new();
+    for (guint i = 0; i < entries->len; i++) {
+        ClipEntry *entry = g_ptr_array_index(entries, i);
+        entry->seq = i;
+        entry->pinned = g_hash_table_contains(ui->pins, entry->id);
+        if (entry->pinned)
+            g_ptr_array_add(ordered, entry);
+    }
+    guint pinned_count = ordered->len;
+    for (guint i = 0; i < entries->len; i++) {
+        ClipEntry *entry = g_ptr_array_index(entries, i);
+        if (!entry->pinned)
+            g_ptr_array_add(ordered, entry);
+    }
+    g_ptr_array_set_free_func(entries, NULL);
+    g_ptr_array_unref(entries);
+    entries = ordered;
+
+    /* Drop pins whose entry no longer exists in cliphist. */
+    if (g_hash_table_size(ui->pins) != pinned_count) {
+        g_hash_table_remove_all(ui->pins);
+        for (guint i = 0; i < pinned_count; i++) {
+            ClipEntry *entry = g_ptr_array_index(entries, i);
+            g_hash_table_add(ui->pins, g_strdup(entry->id));
+        }
+        if (!pins_save(ui->pins, &error)) {
+            g_warning("failed to save pins: %s", error->message);
+            g_clear_error(&error);
+        }
+    }
 
     GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_name(root, "root");
@@ -437,14 +680,15 @@ Ui *ui_build(GtkWindow *window) {
                                     GTK_SELECTION_BROWSE);
     gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(ui->listbox), TRUE);
 
-    guint initial = MIN(entries->len, INITIAL_ROWS);
+    /* Realize every pinned row up front so pending holds only unpinned
+     * entries; batches append at the end, keeping list order == rows order. */
+    guint initial = MIN(entries->len, MAX((guint)INITIAL_ROWS, pinned_count));
     for (guint i = 0; i < initial; i++) {
         ClipEntry *entry = g_ptr_array_index(entries, i);
-        GtkWidget *row = make_row(entry); /* row now owns the entry */
+        GtkWidget *row = make_row(ui, entry); /* row now owns the entry */
         g_ptr_array_add(ui->rows, row);
         gtk_container_add(GTK_CONTAINER(ui->listbox), row);
     }
-    g_ptr_array_set_free_func(entries, NULL);
     if (entries->len > initial) {
         ui->pending = entries;
         ui->pending_pos = initial;
@@ -458,16 +702,19 @@ Ui *ui_build(GtkWindow *window) {
     gtk_container_add(GTK_CONTAINER(window), root);
 
     update_prompt(ui);
-    refilter(ui);
 
     g_signal_connect(ui->entry, "changed", G_CALLBACK(on_entry_changed), ui);
     g_signal_connect(ui->listbox, "row-activated",
                      G_CALLBACK(on_row_activated), ui);
+    g_signal_connect(ui->listbox, "row-selected",
+                     G_CALLBACK(on_row_selected), ui);
     g_signal_connect(ui->listbox, "size-allocate",
                      G_CALLBACK(on_list_allocated), ui);
     g_signal_connect(
         gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(ui->scroller)),
         "value-changed", G_CALLBACK(on_scrolled), ui);
+
+    refilter(ui);
 
     return ui;
 }
@@ -476,6 +723,8 @@ void ui_free(Ui *ui) {
     if (ui == NULL)
         return;
     cancel_pending(ui);
+    track_selected_row(ui, NULL);
+    g_hash_table_unref(ui->pins);
     g_ptr_array_free(ui->rows, TRUE);
     g_free(ui);
 }
