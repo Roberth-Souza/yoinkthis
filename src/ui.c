@@ -11,6 +11,9 @@
 #define THUMB_MAX_HEIGHT 90
 #define THUMB_PRELOAD_MARGIN 200.0
 
+/* Longest content we are willing to consider a URL. */
+#define MAX_URL_LEN 8192
+
 /* Rows built synchronously before first paint; the rest arrive in idle
  * batches so startup stays instant regardless of history size. */
 #define INITIAL_ROWS 40
@@ -103,6 +106,66 @@ static void update_prompt(Ui *ui) {
     else if (ui->filter_mode == FILTER_IMAGE)
         text = "yoink [img] |";
     gtk_label_set_text(GTK_LABEL(ui->prompt), text);
+}
+
+/* --- links ---------------------------------------------------------------- */
+
+static gboolean has_web_scheme(const char *text) {
+    return g_ascii_strncasecmp(text, "http://", 7) == 0 ||
+           g_ascii_strncasecmp(text, "https://", 8) == 0;
+}
+
+/* TRUE when the whole text is one http(s) URL, surrounding whitespace aside. */
+static gboolean is_bare_url(const char *text) {
+    while (g_ascii_isspace(*text))
+        text++;
+    if (!has_web_scheme(text))
+        return FALSE;
+
+    const char *space = strpbrk(text, " \t\r\n");
+    if (space == NULL)
+        return TRUE;
+    for (const char *p = space; *p != '\0'; p++) {
+        if (!g_ascii_isspace(*p))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Preview-only check, used to style rows. The real validation happens on
+ * decode: cliphist truncates previews at 100 characters, so a preview that
+ * looks like a URL is a hint, not the URL itself. */
+static gboolean preview_looks_like_link(const ClipEntry *entry) {
+    return entry->kind == CLIP_TEXT && is_bare_url(entry->preview);
+}
+
+/* Full entry content when it is a bare http(s) URL, NULL otherwise. */
+static char *entry_url(const ClipEntry *entry) {
+    /* Previews are truncated, but a truncated URL still has no whitespace, so
+     * this only skips decodes that cannot possibly yield one. */
+    if (!preview_looks_like_link(entry))
+        return NULL;
+
+    GError *error = NULL;
+    GBytes *bytes = cliphist_decode(entry->id, &error);
+    if (bytes == NULL) {
+        g_warning("decode failed: %s", error->message);
+        g_clear_error(&error);
+        return NULL;
+    }
+
+    gsize len = 0;
+    const char *data = g_bytes_get_data(bytes, &len);
+    char *url = NULL;
+    if (len > 0 && len <= MAX_URL_LEN && g_utf8_validate(data, len, NULL)) {
+        char *text = g_strstrip(g_strndup(data, len));
+        if (is_bare_url(text))
+            url = text;
+        else
+            g_free(text);
+    }
+    g_bytes_unref(bytes);
+    return url;
 }
 
 /* --- thumbnails ---------------------------------------------------------- */
@@ -270,6 +333,35 @@ void ui_activate_selected(Ui *ui) {
     if (!cliphist_copy_to_clipboard(row_entry(row), &error)) {
         g_warning("copy failed: %s", error->message);
         g_clear_error(&error);
+    }
+    gtk_main_quit();
+}
+
+/* Opens bare http(s) URLs only; anything else is a silent no-op that leaves
+ * the picker open. */
+void ui_open_selected(Ui *ui) {
+    GtkListBoxRow *row =
+        gtk_list_box_get_selected_row(GTK_LIST_BOX(ui->listbox));
+    if (row == NULL)
+        return;
+
+    char *url = entry_url(row_entry(row));
+    if (url == NULL)
+        return;
+
+    /* argv, never a shell. The opener outlives us once spawned. */
+    char *argv[] = {"xdg-open", url, NULL};
+    GError *error = NULL;
+    gboolean ok = g_spawn_async(NULL, argv, NULL,
+                                G_SPAWN_SEARCH_PATH |
+                                    G_SPAWN_STDOUT_TO_DEV_NULL |
+                                    G_SPAWN_STDERR_TO_DEV_NULL,
+                                NULL, NULL, NULL, &error);
+    g_free(url);
+    if (!ok) {
+        g_warning("xdg-open failed: %s", error->message);
+        g_clear_error(&error);
+        return;
     }
     gtk_main_quit();
 }
@@ -508,6 +600,9 @@ static GtkWidget *make_row(Ui *ui, ClipEntry *entry) {
         GtkWidget *label = gtk_label_new(entry->preview);
         gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
         gtk_label_set_xalign(GTK_LABEL(label), 0);
+        if (preview_looks_like_link(entry))
+            gtk_style_context_add_class(gtk_widget_get_style_context(label),
+                                        "link");
         gtk_box_pack_start(GTK_BOX(box), label, TRUE, TRUE, 0);
     }
 

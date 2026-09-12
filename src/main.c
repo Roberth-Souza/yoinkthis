@@ -51,7 +51,10 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event,
         return TRUE;
     case GDK_KEY_Return:
     case GDK_KEY_KP_Enter:
-        ui_activate_selected(ui);
+        if (shift)
+            ui_open_selected(ui);
+        else
+            ui_activate_selected(ui);
         return TRUE;
     case GDK_KEY_Down:
         ui_move_selection(ui, 1);
