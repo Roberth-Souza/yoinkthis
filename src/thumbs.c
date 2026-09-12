@@ -1,8 +1,9 @@
 #include "thumbs.h"
 
-#include <glib/gstdio.h>
-
+#include "cache.h"
 #include "cliphist.h"
+
+#define CACHE_NAME "thumbs"
 
 typedef struct {
     char *id;
@@ -14,19 +15,6 @@ static void thumb_request_free(gpointer data) {
     ThumbRequest *req = data;
     g_free(req->id);
     g_free(req);
-}
-
-static char *cache_dir(void) {
-    return g_build_filename(g_get_user_cache_dir(), "yoinkthis", "thumbs", NULL);
-}
-
-static char *cache_path(const char *id) {
-    char *dir = cache_dir();
-    char *name = g_strdup_printf("%s.png", id);
-    char *path = g_build_filename(dir, name, NULL);
-    g_free(name);
-    g_free(dir);
-    return path;
 }
 
 /* Returns a new reference, downscaled only when the source exceeds bounds. */
@@ -78,7 +66,7 @@ static void thumb_task(GTask *task, gpointer source, gpointer task_data,
     (void)source;
     (void)cancellable;
     ThumbRequest *req = task_data;
-    char *path = cache_path(req->id);
+    char *path = cache_path(CACHE_NAME, req->id, "png");
 
     GdkPixbuf *thumb = gdk_pixbuf_new_from_file(path, NULL);
     if (thumb == NULL) {
@@ -89,10 +77,8 @@ static void thumb_task(GTask *task, gpointer source, gpointer task_data,
             g_task_return_error(task, error);
             return;
         }
-        char *dir = cache_dir();
-        g_mkdir_with_parents(dir, 0755);
-        g_free(dir);
-        gdk_pixbuf_save(thumb, path, "png", NULL, NULL);
+        if (cache_ensure_dir(CACHE_NAME))
+            gdk_pixbuf_save(thumb, path, "png", NULL, NULL);
     }
 
     g_free(path);
@@ -116,17 +102,6 @@ GdkPixbuf *thumbs_load_finish(GAsyncResult *result, GError **error) {
     return g_task_propagate_pointer(G_TASK(result), error);
 }
 
-void thumbs_clear_cache(void) {
-    char *dir = cache_dir();
-    GDir *handle = g_dir_open(dir, 0, NULL);
-    if (handle != NULL) {
-        const char *name;
-        while ((name = g_dir_read_name(handle)) != NULL) {
-            char *path = g_build_filename(dir, name, NULL);
-            g_unlink(path);
-            g_free(path);
-        }
-        g_dir_close(handle);
-    }
-    g_free(dir);
+void thumbs_prune_cache(GHashTable *live_ids) {
+    cache_prune(CACHE_NAME, live_ids);
 }
