@@ -134,6 +134,25 @@ gboolean cliphist_delete(const ClipEntry *entry, GError **error) {
     return ok;
 }
 
+gboolean cliphist_delete_entries(GPtrArray *entries, GError **error) {
+    if (entries->len == 0)
+        return TRUE;
+
+    GString *payload = g_string_new(NULL);
+    for (guint i = 0; i < entries->len; i++) {
+        const ClipEntry *entry = g_ptr_array_index(entries, i);
+        g_string_append(payload, entry->line);
+        g_string_append_c(payload, '\n');
+    }
+    gsize len = payload->len;
+    GBytes *input = g_bytes_new_take(g_string_free(payload, FALSE), len);
+
+    const char *argv[] = {"cliphist", "delete", NULL};
+    gboolean ok = run_command(argv, input, NULL, error);
+    g_bytes_unref(input);
+    return ok;
+}
+
 gboolean cliphist_wipe(GError **error) {
     const char *argv[] = {"cliphist", "wipe", NULL};
     return run_command(argv, NULL, NULL, error);

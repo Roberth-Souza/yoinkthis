@@ -14,6 +14,8 @@ typedef struct {
     char *preview;  /* UTF-8-sanitized preview for display */
     char *img_info; /* "png 435x466 · 122 KiB" for images, NULL otherwise */
     ClipKind kind;
+    gboolean pinned;
+    guint seq;      /* newest-first position, restores order on unpin */
 } ClipEntry;
 
 /* Returns array of ClipEntry* (newest first) with clip_entry_free as free func,
@@ -27,6 +29,10 @@ GBytes *cliphist_decode(const char *id, GError **error);
 gboolean cliphist_copy_to_clipboard(const ClipEntry *entry, GError **error);
 
 gboolean cliphist_delete(const ClipEntry *entry, GError **error);
+
+/* Deletes all given ClipEntry* in a single cliphist invocation. */
+gboolean cliphist_delete_entries(GPtrArray *entries, GError **error);
+
 gboolean cliphist_wipe(GError **error);
 
 void clip_entry_free(gpointer data);

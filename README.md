@@ -37,8 +37,8 @@ yoinkthis only reads history; something must be writing it. Two `wl-paste`
 watchers have to run in the background and store every new copy into cliphist:
 
 ```
-wl-paste --type text  --watch cliphist store
-wl-paste --type image --watch cliphist store
+wl-paste --type text/plain --watch cliphist store
+wl-paste --type image      --watch cliphist store
 ```
 
 Some shells already manage these for you (e.g. noctalia-shell with clipboard
@@ -46,19 +46,29 @@ history enabled) — in that case there is nothing to do. Otherwise autostart
 them from your compositor config. Hyprland:
 
 ```
-exec-once = wl-paste --type text --watch cliphist store
+exec-once = wl-paste --type text/plain --watch cliphist store
 exec-once = wl-paste --type image --watch cliphist store
 ```
 
 Lua-based config:
 
 ```lua
-hl.exec_once("wl-paste --type text --watch cliphist store")
+hl.exec_once("wl-paste --type text/plain --watch cliphist store")
 hl.exec_once("wl-paste --type image --watch cliphist store")
 ```
 
 Without the image watcher, images are never stored and the `[img]` filter will
 always be empty.
+
+Use `text/plain`, not `text`. The `text` shorthand also matches `text/html`, and
+several sources offer HTML alongside the image — Firefox's "Copy Image" is one.
+With `--type text` that watcher also stores such a copy, so one image ends up in
+history twice: once as the picture, once as a blob of HTML markup. `text/plain`
+declines those copies and leaves the image watcher to store the real thing.
+
+A single untyped `wl-paste --watch cliphist store` has the same problem, for the
+same reason: with no type requested, wl-paste prefers text when the source
+offers any.
 
 ## Hyprland
 
@@ -86,9 +96,26 @@ No window rules needed — the overlay layer and centering come from layer-shell
 | `Ctrl+d` / `Ctrl+u` | jump half page |
 | `Enter` / click | copy entry to clipboard and close |
 | `Esc` | close |
-| `Ctrl+x` | delete selected entry |
-| `Ctrl+Shift+X` twice | wipe all history |
+| `Ctrl+x` | delete selected entry (no-op on pinned) |
+| `Ctrl+Shift+X` twice | wipe all history except pinned |
 | `Ctrl+f` | cycle filter: all → text → images |
+
+## Pinning
+
+Selecting a row reveals a translucent pushpin at its right edge — click it to
+pin the entry (mouse only, no keybind). Pinned entries:
+
+- float to the top of the list, above the newest-first history;
+- always show a solid white pin icon;
+- cannot be deleted: `Ctrl+x` ignores them and the `Ctrl+Shift+X` wipe removes
+  everything else but keeps them. Unpin first (click the solid pin) to delete.
+
+Pins persist across sessions in `~/.local/state/yoinkthis/pins` (one cliphist
+id per line).
+
+Note: cliphist dedupes re-copied content under a new id, so re-copying a
+pinned item creates a fresh unpinned entry; the orphaned pin is pruned on the
+next launch.
 
 ## Theming
 
@@ -97,4 +124,4 @@ The built-in theme mirrors `~/.config/rofi/config.rasi`. To customize, copy
 no rebuild needed.
 
 Image thumbnails are cached (already scaled) in `~/.cache/yoinkthis/thumbs/`
-and cleared automatically on wipe.
+and cleared automatically on wipe (kept when the wipe spares pinned entries).
