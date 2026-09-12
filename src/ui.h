@@ -12,6 +12,7 @@ Ui *ui_build(GtkWindow *window);
 void ui_focus_entry(Ui *ui);
 void ui_move_selection(Ui *ui, int delta);
 void ui_activate_selected(Ui *ui); /* copy to clipboard, then quit */
+void ui_open_selected(Ui *ui); /* open bare http(s) entries in the browser */
 void ui_delete_selected(Ui *ui);
 void ui_request_wipe(Ui *ui); /* two-press confirm */
 void ui_disarm_wipe(Ui *ui);

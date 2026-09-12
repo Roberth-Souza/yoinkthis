@@ -95,10 +95,22 @@ No window rules needed — the overlay layer and centering come from layer-shell
 | `Ctrl+j` / `Ctrl+k` (or arrows) | move selection |
 | `Ctrl+d` / `Ctrl+u` | jump half page |
 | `Enter` / click | copy entry to clipboard and close |
+| `Shift+Enter` | open entry in the default browser and close |
 | `Esc` | close |
 | `Ctrl+x` | delete selected entry (no-op on pinned) |
 | `Ctrl+Shift+X` twice | wipe all history except pinned |
 | `Ctrl+f` | cycle filter: all → text → images |
+
+## Links
+
+An entry whose whole content is a single `http://` or `https://` URL is shown
+in blue. `Shift+Enter` hands it to `xdg-open` and closes the picker, without
+touching the clipboard. Nothing happens on any other entry — no other scheme is
+accepted, and text with the URL buried in it does not count.
+
+Detection runs on the full entry, not the list preview, so URLs longer than
+cliphist's 100-character preview still open. The blue styling does come from
+the preview, which is why a very long URL is colored from its first characters.
 
 ## Pinning
 
