@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cliphist.h"
+#include "imgfile.h"
 #include "pins.h"
 #include "thumbs.h"
 
@@ -323,6 +324,25 @@ static void cancel_pending(Ui *ui) {
     }
 }
 
+/* Cache files are keyed by cliphist id and are all regenerable, so the ones
+ * whose entry left the history are pure dead weight. Entries not yet realized
+ * into rows are still live and keep theirs. */
+static void prune_caches(Ui *ui) {
+    GHashTable *live = g_hash_table_new(g_str_hash, g_str_equal);
+    for (guint i = 0; i < ui->rows->len; i++)
+        g_hash_table_add(live, row_entry(g_ptr_array_index(ui->rows, i))->id);
+    if (ui->pending != NULL) {
+        for (guint i = ui->pending_pos; i < ui->pending->len; i++) {
+            ClipEntry *entry = g_ptr_array_index(ui->pending, i);
+            g_hash_table_add(live, entry->id);
+        }
+    }
+
+    thumbs_prune_cache(live);
+    imgfile_prune_cache(live);
+    g_hash_table_destroy(live);
+}
+
 void ui_activate_selected(Ui *ui) {
     GtkListBoxRow *row =
         gtk_list_box_get_selected_row(GTK_LIST_BOX(ui->listbox));
@@ -337,33 +357,78 @@ void ui_activate_selected(Ui *ui) {
     gtk_main_quit();
 }
 
-/* Opens bare http(s) URLs only; anything else is a silent no-op that leaves
- * the picker open. */
+/* Hands target to opener, which may carry arguments of its own. The command
+ * is split with shell quoting rules but never run through a shell, so nothing
+ * in target is ever interpreted. The opener outlives us once spawned. */
+static gboolean spawn_opener(const char *opener, const char *target) {
+    GError *error = NULL;
+    int opener_argc = 0;
+    char **opener_argv = NULL;
+    if (!g_shell_parse_argv(opener, &opener_argc, &opener_argv, &error)) {
+        g_warning("bad opener \"%s\": %s", opener, error->message);
+        g_clear_error(&error);
+        return FALSE;
+    }
+
+    if (opener_argc == 0) { /* never let target land in argv[0] */
+        g_warning("empty opener");
+        g_strfreev(opener_argv);
+        return FALSE;
+    }
+
+    char **argv = g_new0(char *, opener_argc + 2);
+    for (int i = 0; i < opener_argc; i++)
+        argv[i] = opener_argv[i];
+    argv[opener_argc] = g_strdup(target);
+    g_free(opener_argv); /* elements moved into argv */
+
+    gboolean ok = g_spawn_async(NULL, argv, NULL,
+                                G_SPAWN_SEARCH_PATH |
+                                    G_SPAWN_STDOUT_TO_DEV_NULL |
+                                    G_SPAWN_STDERR_TO_DEV_NULL,
+                                NULL, NULL, NULL, &error);
+    g_strfreev(argv);
+    if (!ok) {
+        g_warning("%s failed: %s", opener, error->message);
+        g_clear_error(&error);
+    }
+    return ok;
+}
+
+/* Opens bare http(s) URLs in the browser and image entries in the image
+ * viewer; anything else is a silent no-op that leaves the picker open. */
 void ui_open_selected(Ui *ui) {
     GtkListBoxRow *row =
         gtk_list_box_get_selected_row(GTK_LIST_BOX(ui->listbox));
     if (row == NULL)
         return;
 
-    char *url = entry_url(row_entry(row));
-    if (url == NULL)
-        return;
+    ClipEntry *entry = row_entry(row);
+    const char *opener = "xdg-open";
+    char *target = NULL;
 
-    /* argv, never a shell. The opener outlives us once spawned. */
-    char *argv[] = {"xdg-open", url, NULL};
-    GError *error = NULL;
-    gboolean ok = g_spawn_async(NULL, argv, NULL,
-                                G_SPAWN_SEARCH_PATH |
-                                    G_SPAWN_STDOUT_TO_DEV_NULL |
-                                    G_SPAWN_STDERR_TO_DEV_NULL,
-                                NULL, NULL, NULL, &error);
-    g_free(url);
-    if (!ok) {
-        g_warning("xdg-open failed: %s", error->message);
-        g_clear_error(&error);
-        return;
+    if (entry->kind == CLIP_IMAGE) {
+        GError *error = NULL;
+        target = imgfile_resolve(entry, &error);
+        if (target == NULL) {
+            g_warning("could not open image %s: %s", entry->id,
+                      error != NULL ? error->message : "unknown error");
+            g_clear_error(&error);
+            return;
+        }
+        const char *viewer = g_getenv("YOINKTHIS_IMAGE_VIEWER");
+        if (viewer != NULL && *viewer != '\0')
+            opener = viewer;
+    } else {
+        target = entry_url(entry);
+        if (target == NULL)
+            return;
     }
-    gtk_main_quit();
+
+    gboolean ok = spawn_opener(opener, target);
+    g_free(target);
+    if (ok)
+        gtk_main_quit();
 }
 
 void ui_delete_selected(Ui *ui) {
@@ -394,6 +459,7 @@ void ui_delete_selected(Ui *ui) {
 
     g_ptr_array_remove(ui->rows, row);
     gtk_widget_destroy(GTK_WIDGET(row));
+    prune_caches(ui);
     if (next != NULL) {
         gtk_list_box_select_row(GTK_LIST_BOX(ui->listbox), next);
         scroll_to_row(ui, next);
@@ -432,6 +498,8 @@ static void wipe_except_pinned(Ui *ui) {
         gtk_widget_destroy(GTK_WIDGET(row));
     }
 
+    prune_caches(ui);
+
     GPtrArray *rows = visible_rows(ui);
     if (rows->len > 0) {
         GtkListBoxRow *first = g_ptr_array_index(rows, 0);
@@ -450,7 +518,6 @@ void ui_request_wipe(Ui *ui) {
 
     ui->wipe_armed = FALSE;
     if (g_hash_table_size(ui->pins) > 0) {
-        /* Keep the thumb cache: pinned image entries still need it. */
         wipe_except_pinned(ui);
         update_prompt(ui);
         return;
@@ -461,11 +528,12 @@ void ui_request_wipe(Ui *ui) {
         g_warning("wipe failed: %s", error->message);
         g_clear_error(&error);
     } else {
-        thumbs_clear_cache();
         cancel_pending(ui);
         for (guint i = 0; i < ui->rows->len; i++)
             gtk_widget_destroy(GTK_WIDGET(g_ptr_array_index(ui->rows, i)));
         g_ptr_array_set_size(ui->rows, 0);
+        /* Nothing survived, so this empties both caches. */
+        prune_caches(ui);
     }
     update_prompt(ui);
 }

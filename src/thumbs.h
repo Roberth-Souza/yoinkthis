@@ -12,6 +12,7 @@ void thumbs_load_async(const char *id, int max_width, int max_height,
 /* Returns a new GdkPixbuf reference, or NULL with error set. */
 GdkPixbuf *thumbs_load_finish(GAsyncResult *result, GError **error);
 
-void thumbs_clear_cache(void);
+/* Drops cached thumbnails whose cliphist id is absent from live_ids. */
+void thumbs_prune_cache(GHashTable *live_ids);
 
 #endif

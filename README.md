@@ -20,6 +20,7 @@ database — it never captures clipboard changes itself. See
 
 - `cliphist` — clipboard history database
 - `wl-clipboard` — provides `wl-copy`/`wl-paste`
+- `xdg-utils` — provides `xdg-open`, used to open links and images
 
 **Compositor:** anything implementing the `wlr-layer-shell` protocol
 (Hyprland, Sway, river, …). GNOME and KDE do not implement it.
@@ -95,7 +96,7 @@ No window rules needed — the overlay layer and centering come from layer-shell
 | `Ctrl+j` / `Ctrl+k` (or arrows) | move selection |
 | `Ctrl+d` / `Ctrl+u` | jump half page |
 | `Enter` / click | copy entry to clipboard and close |
-| `Shift+Enter` | open entry in the default browser and close |
+| `Shift+Enter` | open entry: links in the browser, images in the viewer |
 | `Esc` | close |
 | `Ctrl+x` | delete selected entry (no-op on pinned) |
 | `Ctrl+Shift+X` twice | wipe all history except pinned |
@@ -111,6 +112,44 @@ accepted, and text with the URL buried in it does not count.
 Detection runs on the full entry, not the list preview, so URLs longer than
 cliphist's 100-character preview still open. The blue styling does come from
 the preview, which is why a very long URL is colored from its first characters.
+
+## Images
+
+`Shift+Enter` on an image entry opens it in an image viewer and closes the
+picker, again without touching the clipboard.
+
+cliphist stores image bytes, not paths, so an entry has no location of its own.
+Screenshot tools write the file to disk and copy those same bytes, though, so
+the original can be recovered by content: yoinkthis compares the entry against
+files of the same size and confirms a candidate byte for byte. The size check
+rejects nearly everything without opening a file, which is what keeps this to a
+few milliseconds over a folder of a few thousand images. It runs on the
+keypress, never at startup.
+
+Finding the original is worth the trouble because the viewer then gets a real
+file in a real directory: its actual name, and its neighbours to page through.
+A scratch copy has neither.
+
+The search covers the XDG pictures directory, a few levels deep, skipping
+hidden directories. Override it with `YOINKTHIS_IMAGE_DIRS`, a `:`-separated
+list of directories:
+
+```
+YOINKTHIS_IMAGE_DIRS=~/Pictures/Screenshots:~/Downloads
+```
+
+When nothing matches, which is the normal case for an image copied straight out
+of a browser, the entry is written to `~/.cache/yoinkthis/full/` and that copy
+is opened instead. The image still opens; only the surrounding directory is
+lost.
+
+`xdg-open` picks the viewer, so the handler for the image's type decides what
+appears. To bypass that for yoinkthis alone, set `YOINKTHIS_IMAGE_VIEWER`. It
+may carry arguments, and the path is appended to them:
+
+```
+YOINKTHIS_IMAGE_VIEWER="swayimg --gallery"
+```
 
 ## Pinning
 
@@ -135,5 +174,14 @@ The built-in theme mirrors `~/.config/rofi/config.rasi`. To customize, copy
 `style.css` to `~/.config/yoinkthis/style.css` and edit — it is plain GTK CSS,
 no rebuild needed.
 
-Image thumbnails are cached (already scaled) in `~/.cache/yoinkthis/thumbs/`
-and cleared automatically on wipe (kept when the wipe spares pinned entries).
+## Caches
+
+Two caches live under `~/.cache/yoinkthis/`: `thumbs/` holds the scaled list
+thumbnails, `full/` the copies made for images with no file of their own. Both
+are keyed by cliphist id and both are regenerable, so losing either costs a
+decode and nothing else.
+
+Deleting an entry drops its cached files, and a wipe drops every file whose
+entry is gone. A wipe that spares pinned entries therefore spares their caches
+too, and a wipe with nothing pinned empties both directories. Your own image
+folders are only ever read, never written or deleted.
