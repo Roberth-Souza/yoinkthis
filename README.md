@@ -37,8 +37,8 @@ yoinkthis only reads history; something must be writing it. Two `wl-paste`
 watchers have to run in the background and store every new copy into cliphist:
 
 ```
-wl-paste --type text  --watch cliphist store
-wl-paste --type image --watch cliphist store
+wl-paste --type text/plain --watch cliphist store
+wl-paste --type image      --watch cliphist store
 ```
 
 Some shells already manage these for you (e.g. noctalia-shell with clipboard
@@ -46,19 +46,29 @@ history enabled) — in that case there is nothing to do. Otherwise autostart
 them from your compositor config. Hyprland:
 
 ```
-exec-once = wl-paste --type text --watch cliphist store
+exec-once = wl-paste --type text/plain --watch cliphist store
 exec-once = wl-paste --type image --watch cliphist store
 ```
 
 Lua-based config:
 
 ```lua
-hl.exec_once("wl-paste --type text --watch cliphist store")
+hl.exec_once("wl-paste --type text/plain --watch cliphist store")
 hl.exec_once("wl-paste --type image --watch cliphist store")
 ```
 
 Without the image watcher, images are never stored and the `[img]` filter will
 always be empty.
+
+Use `text/plain`, not `text`. The `text` shorthand also matches `text/html`, and
+several sources offer HTML alongside the image — Firefox's "Copy Image" is one.
+With `--type text` that watcher also stores such a copy, so one image ends up in
+history twice: once as the picture, once as a blob of HTML markup. `text/plain`
+declines those copies and leaves the image watcher to store the real thing.
+
+A single untyped `wl-paste --watch cliphist store` has the same problem, for the
+same reason: with no type requested, wl-paste prefers text when the source
+offers any.
 
 ## Hyprland
 
